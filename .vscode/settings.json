@@ -1,0 +1,9 @@
+{
+"verilog.linting.linter": "verilator",
+"verilog.linting.verilator.runAtFileLocation": true,
+"verilog.linting.verilator.includePath": [
+    "./hardware/rtl/include/",
+],
+"verilog.linting.verilator.arguments": "-Wno-UNOPTFLAT",
+
+}

@@ -1,0 +1,6 @@
+# Ignore datasets
+model/data/
+
+# Ignore generated weights and checkpoints
+*.pth
+*.ckpt
