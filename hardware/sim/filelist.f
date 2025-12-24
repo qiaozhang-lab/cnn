@@ -1,0 +1,15 @@
++incdir+../rtl/include
+../rtl/include/definitions.sv
+../rtl/memory/rom_image.sv
+../rtl/memory/rom_weights.sv
+../rtl/memory/rom_bias.sv
+../rtl/memory/column_fifo.sv
+../rtl/memory/input_buffer_bank.sv
+../rtl/memory/result_handler.sv
+../rtl/wrapper/active_row_register.sv
+../rtl/control/weight_scheduler.sv
+../rtl/ip/systolic_arrays/pe.sv
+../rtl/ip/systolic_arrays/stream_if.sv
+../rtl/ip/systolic_arrays/systolic_top.sv
+../rtl/wrapper/systolic_wrapper.sv
+../sim/unit_tests/tb_systolic_wrapper.sv

@@ -1,74 +1,60 @@
 '''
- @Author: Qiao Zhang
- @Date: 2025-12-18 21:09:26
- @LastEditTime: 2025-12-18 22:14:36
- @LastEditors: Qiao Zhang
- @Description: Quantize LeNet weights and input, export HEX for systemverilog
- @FilePath: /cnn/model/src/LeNet/export_hardware.py
+ @Author: Qiao Zhang & NPU Team
+ @Description: Quantize LeNet weights and input, export Hardware-Ready HEX
+               - Weights: Packed 6 channels per line (48-bit), 25 lines total.
+               - Image: 8-bit per line, 784 lines.
+               - VCS-Safe: No trailing newlines.
 '''
 import torch
 import torch.nn as nn
 import os
 import numpy as np
-from   LeNet5 import LeNet5
+from LeNet5 import LeNet5
 
 #==================== Configuration ==============
-# 1. Quantization Setup(Q7 fixed point: 1 sign bit, 7 fractional bits)
+# 1. Quantization Setup (Q1.7 fixed point)
 SCALE_BITS = 7
-SCALE_FACTOR = 2**7
+SCALE_FACTOR = 128.0 # 2^7
 
 # 2. Output Paths
 OUTPUT_DIR = "../../../hardware/rtl/init_files"
-# Check if not exists then creates it
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
 # ================= Helper Functions =================
-def to_fixed(value):
+def to_fixed(value, scale):
     '''
-    Convert float point to int8:(clamp to -128 ~ 127)
+    Convert float to int8 with scaling: (clamp to -128 ~ 127)
     '''
-    int_val = int(round(value))
-    int_val = max(min(int_val, 127), -128)# int_val = min(max(int_val, -128), 127)
+    # 1. Scale
+    scaled_val = value * scale
+    # 2. Round
+    int_val = int(round(scaled_val))
+    # 3. Clamp
+    int_val = max(min(int_val, 127), -128)
     return int_val
 
 def to_hex(val, width=8):
     '''
-    Convert Integer to Hex string(Handle 2's complement)
+    Convert Integer to Hex string (Handle 2's complement)
     '''
-    mask = (1 << width) - 1 # 0xFF
+    mask = (1 << width) - 1
+    # Format: 2 hex chars for 8-bit, 8 hex chars for 32-bit
     return f"{(val & mask):0{width//4}x}"
 
-def software_conv1_golden(img_int, w_int, b_int):
+def write_hex_file(filename, data_list):
     '''
-    Simulate Hardware Convolutional to generate the golden output
-    Input: Int8, Weight: Int8, Bias: Int32 -> Output: Int32(Accumulator)
+    Helper to write list of hex strings to file without trailing newline
     '''
-    # Image shape: (1, 28, 28), w shape(1, 6, 5, 5)
-    K, C, R, S = w_int.shape
-    _, H, W = img_int.shape
-    # activate slip windows position coordinate(top left corner)
-    H_out, W_out = 24, 24 # 28-5+1=24
-
-    # declare a output arrays
-    output = np.zeros((K, H_out, W_out), dtype=np.int32)
-
-    print("Compute Golden Result for Convolutional(Slow):")
-
-    # (k, y, x) to define the position coordinate of slip windows
-    # (r, s) to define the position coordinate of a pixel which is located in a selected slip windows
-    for k in range(K):
-        for y in range(W_out):
-            for x in range(H_out):
-                acc = b_int[k] # initialize with bias
-                # Implicit Im2col Dot Product
-                for r in range(R):
-                    for s in range(S):
-                        pixel = img_int[0, y+r, x+s]
-                        weight = w_int[k, 0, r, s]
-                        acc += pixel*weight
-                output[k, y, x] = acc
-    return output
+    path = os.path.join(OUTPUT_DIR, filename)
+    with open(path, 'w') as f:
+        for i, hex_str in enumerate(data_list):
+            # Write newline only if it's NOT the last line
+            if i < len(data_list) - 1:
+                f.write(hex_str + "\n")
+            else:
+                f.write(hex_str) # Last line, no newline
+    print(f"Exported {filename}: {len(data_list)} lines.")
 
 # ================= Main Process =================
 def main():
@@ -81,80 +67,76 @@ def main():
         net.load_state_dict(torch.load("lenet_weights.pth", map_location=device))
     except FileNotFoundError:
         print("Error: lenet_weights.pth not found! Please run train.py first")
-        return
+        # Fallback for debugging without trained weights
+        print("WARNING: Using random weights for test structure generation.")
 
     net.eval()
 
+    # ---------------------------------------------------------
     # 2. Export Weights (Layer 1: Conv2d(1, 6, 5))
+    #    Hardware Requirement: Wide ROM (48-bit width, 25 depth)
+    # ---------------------------------------------------------
     print("Exporting Conv1 Weights...")
-    w_tensor = net.features[0].weight.data # [6, 1, 5, 5]
-    b_tensor = net.features[0].bias.data   # [6]
+    # Shape: [Out_Ch=6, In_Ch=1, R=5, S=5]
+    w_tensor = net.features[0].weight.data
 
-    K, C, R, S = w_tensor.shape
+    K, C, R, S = w_tensor.shape # 6, 1, 5, 5
 
-    # Store Quantized Weights for Golden calculation
-    w_int_cache = np.zeros((K, C, R, S), dtype=np.int32)
-    b_int_cache = np.zeros((K), dtype=np.int32)
+    hex_lines = []
 
-    with open(os.path.join(OUTPUT_DIR, "conv1_weights.hex"), 'w') as f:
-        # Layout: Row Major (K -> C -> R -> S) -> Corresponds to GEMM Matrix A Rows
-        for k in range(K):
-            # For each kernel (GEMM Row)
-            for c in range(C):
-                for r in range(R):
-                    for s in range(S):
-                        val_float = w_tensor[k, c, r, s].item()
-                        val_int = to_fixed(val_float)
-                        w_int_cache[k, c, r, s] = val_int
-                        # Write 8-bit hex
-                        f.write(to_hex(val_int, 8) + "\n")
-            # Note: In a real system, you might align to 32-bit or add padding here
+    # Iterate Spatial Dimensions (0..24)
+    # The ROM address corresponds to spatial position r,s
+    for r in range(R):
+        for s in range(S):
+            # For each spatial position, pack 6 output channels (K=0..5)
+            # Order: MSB -> Ch5 ... Ch0 -> LSB
+            line_hex = ""
+            for k in range(K-1, -1, -1): # 5 down to 0
+                val_float = w_tensor[k, 0, r, s].item()
+                val_int = to_fixed(val_float, SCALE_FACTOR)
+                line_hex += to_hex(val_int, 8)
 
-    with open(os.path.join(OUTPUT_DIR, "conv1_bias.hex"), 'w') as f:
-        for k in range(K):
-            val_float = b_tensor[k].item()
-            # Bias usually has higher precision. Let's align it to scale*scale (double precision)
-            # or keep it simple. Here we use same scale for simplicity,
-            # BUT usually bias is Scale_Input * Scale_Weight.
-            # Let's assume Input is also Q7, so Bias should be Q14.
-            # For simplicity in this tutorial, let's treat bias as Q7 temporarily or Q14.
-            # Let's use Q14 for Bias to match Acc (Q7*Q7).
-            val_int = int(round(val_float * (SCALE_FACTOR * SCALE_FACTOR)))
-            b_int_cache[k] = val_int
-            f.write(to_hex(val_int, 32) + "\n") # 32-bit Bias
+            hex_lines.append(line_hex)
 
-    # 3. Export Input Image (Random or Specific)
+    write_hex_file("conv1_weights.hex", hex_lines)
+
+    # Export Bias (Optional, for Acc Init)
+    # Bias is usually 32-bit (Accumulator width)
+    b_tensor = net.features[0].bias.data
+    bias_lines = []
+    for k in range(K):
+        val_float = b_tensor[k].item()
+        # Bias Scale = Scale_In * Scale_W = 128 * 128 = 16384 (Q14)
+        val_int = int(round(val_float * (SCALE_FACTOR * SCALE_FACTOR)))
+        bias_lines.append(to_hex(val_int, 32))
+
+    write_hex_file("conv1_bias.hex", bias_lines)
+
+
+    # ---------------------------------------------------------
+    # 3. Export Input Image
+    # ---------------------------------------------------------
     print("Exporting Input Image...")
-    # Let's grab a real image from MNIST or generate a fixed pattern
-    # Using fixed pattern for easy debugging:
-    # img[y,x] = (y+x) % 16 (just to see patterns)
+
+    # Generate a simple deterministic pattern for Hardware Verification
+    # (Easier to debug than random numbers)
+    # Pattern: Incrementing 0, 1, 2... wrap around 255
     img_tensor = torch.zeros(1, 28, 28)
     for y in range(28):
         for x in range(28):
-            img_tensor[0, y, x] = (y + x) % 16 / 16.0 # Normalize 0~1
+            # Normalized 0.0 ~ 1.0 approx
+            val = ((y * 28 + x) % 255) / 255.0
+            img_tensor[0, y, x] = val
 
-    img_int_cache = np.zeros((1, 28, 28), dtype=np.int32)
+    img_lines = []
+    # Raster Scan Order
+    for y in range(28):
+        for x in range(28):
+            val_float = img_tensor[0, y, x].item()
+            val_int = to_fixed(val_float, SCALE_FACTOR)
+            img_lines.append(to_hex(val_int, 8))
 
-    with open(os.path.join(OUTPUT_DIR, "input_image.hex"), 'w') as f:
-        # Raster Scan Order (Line by Line)
-        for y in range(28):
-            for x in range(28):
-                val_float = img_tensor[0, y, x].item()
-                val_int = to_fixed(val_float) # Quantize Input to Q7
-                img_int_cache[0, y, x] = val_int
-                f.write(to_hex(val_int, 8) + "\n")
-
-    # 4. Generate Golden Output (Software Simulation of Hardware)
-    print("Generating Golden Output Vector...")
-    golden_out = software_conv1_golden(img_int_cache, w_int_cache, b_int_cache)
-
-    with open(os.path.join(OUTPUT_DIR, "conv1_golden_out.hex"), 'w') as f:
-        # Export in (K, H_out, W_out) order
-        for k in range(golden_out.shape[0]):
-            for y in range(golden_out.shape[1]):
-                for x in range(golden_out.shape[2]):
-                    val = golden_out[k, y, x]
-                    f.write(to_hex(val, 32) + "\n") # Accumulator is 32-bit
+    write_hex_file("input_image.hex", img_lines)
 
     print(f"All files exported to: {os.path.abspath(OUTPUT_DIR)}")
 

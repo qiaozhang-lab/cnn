@@ -1,11 +1,11 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-13 17:51:49
- * @LastEditTime: 2025-12-13 22:21:25
+ * @LastEditTime: 2025-12-23 08:11:20
  * @LastEditors: Qiao Zhang
  * @Description: Systolic Arrays top module
  *  - Instantiate pe.sv
- * @FilePath: /systolic_arrays/rtl/systolic_top.sv
+ * @FilePath: /cnn/hardware/rtl/ip/systolic_arrays/systolic_top.sv
  */
 
 `timescale 1ns/1ps
@@ -15,6 +15,8 @@ module systolic_top (
     // system inputs
     input   logic           clk_i           ,
     input   logic           rst_async_n_i   ,
+
+    input   logic[MATRIX_B_COL-1 : 0]   pe_clear_col_i  ,// drive by result handler, clear by column
 
     // west direct interface
     input   logic[MATRIX_A_ROW-1 : 0]   west_valid_i    ,
@@ -98,7 +100,27 @@ module systolic_top (
     endgenerate
 
     // =================================================================
-    //  Step 3: PE Instantiate and Interconnect
+    //  Step3 : Internal Clear Skew Logic
+    // =================================================================
+    logic clear_grid [MATRIX_A_ROW][MATRIX_B_COL];
+
+    generate
+        for (cols = 0; cols < MATRIX_B_COL; cols++) begin : gen_col_clear_skew
+            assign clear_grid[0][cols] = pe_clear_col_i[cols];
+
+            for (rows = 1; rows < MATRIX_A_ROW; rows++) begin : gen_row_delay
+                always_ff @(posedge clk_i or negedge rst_async_n_i) begin
+                    if (!rst_async_n_i)
+                        clear_grid[rows][cols] <= 1'b0;
+                    else
+                        clear_grid[rows][cols] <= clear_grid[rows-1][cols];
+                end
+            end
+        end
+    endgenerate
+
+    // =================================================================
+    //  Step 4: PE Instantiate and Interconnect
     // =================================================================
     generate
         for(rows=0; rows<MATRIX_A_ROW; rows++) begin : gen_rows
@@ -113,10 +135,14 @@ module systolic_top (
                 pe systolic_pe(
                     .clk_i(clk_i),
                     .rst_async_n_i(rst_async_n_i),
+
+                    .clear_acc_i(clear_grid[rows][cols]),
+
                     .din_west(h_links[idx_h_curr]),
                     .din_north(v_links[idx_v_curr]),
                     .dout_east(h_links[idx_h_next]),
                     .dout_south(v_links[idx_v_next]),
+
                     .result_o(result_o[rows][cols])
                 );
             end

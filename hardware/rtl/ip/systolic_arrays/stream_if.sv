@@ -1,10 +1,10 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-13 14:21:26
- * @LastEditTime: 2025-12-13 14:43:00
+ * @LastEditTime: 2025-12-21 20:00:23
  * @LastEditors: Qiao Zhang
  * @Description: A stream interface between data source/pe and pe/result output.
- * @FilePath: /systolic_arrays/rtl/stream_if.sv
+ * @FilePath: /cnn/hardware/rtl/ip/systolic_arrays/stream_if.sv
  */
 `ifndef STREAM_IF
     `define STREAM_IF
@@ -17,9 +17,9 @@
         input logic     rst_async_n
     );
 
-    logic                       valid   ;
-    logic                       ready   ;
-    logic[DATA_WIDTH-1 : 0]     data    ;
+    logic                               valid   ;
+    logic                               ready   ;
+    logic signed [DATA_WIDTH-1 : 0]     data    ;
 
     // send valid and data signals to slave, receive ready signal from slave
     modport master (

@@ -1,7 +1,7 @@
 # ===============================================
 # Makefile for VCS + Verdi Simulation Environment
 # ===============================================
-export project_name = core_top
+export project_name = systolic_wrapper
 
 CC := /usr/bin/gcc-4.8
 CXX := /usr/bin/g++-4.8
@@ -58,8 +58,7 @@ dbg:
 		-f ./filelist.f \
 		-top $(TOP_MODULE) \
 		$(load_wave) \
-		-nologo	\
-		-scale 1.5
+		-nologo
 
 # ===== Clean Simulation Files =====
 clean:

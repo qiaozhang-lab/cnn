@@ -3,6 +3,10 @@
 "verilog.linting.verilator.runAtFileLocation": true,
 "verilog.linting.verilator.includePath": [
     "./hardware/rtl/include/",
+    "./hardware/rtl/memory/",
+    "./hardware/rtl/ip/systolic_arrays/",
+    "./hardware/rtl/wrapper/",
+    "./hardware/rtl/control",
 ],
 "verilog.linting.verilator.arguments": "-Wno-UNOPTFLAT",
 
