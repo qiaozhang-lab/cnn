@@ -1,10 +1,14 @@
 '''
- @Author: Qiao Zhang & NPU Team
- @Description: Quantize LeNet weights and input, export Hardware-Ready HEX
+ @Author: Qiao Zhang
+ @Date: 2025-12-18 21:09:26
+ @LastEditTime: 2025-12-28 02:01:25
+ @LastEditors: Qiao Zhang
+ @Description: Quantize LeNet weights and input, export Hardware-Ready HEX for Conv1
                - Weights: Packed 6 channels per line (48-bit), 25 lines total.
                - Image: 8-bit per line, 784 lines.
-               - VCS-Safe: No trailing newlines.
+ @FilePath: /cnn/model/src/LeNet/export_conv1.py
 '''
+
 import torch
 import torch.nn as nn
 import os
@@ -137,6 +141,81 @@ def main():
             img_lines.append(to_hex(val_int, 8))
 
     write_hex_file("input_image.hex", img_lines)
+
+    # ---------------------------------------------------------
+    # 4. Export Conv2 Weights (Layer 3: Conv2d(6, 16, 5))
+    # ---------------------------------------------------------
+    print("Exporting Conv2 Weights...")
+    # Conv2 Weight Shape: [Out=16, In=6, R=5, S=5]
+    w2_tensor = net.features[3].weight.data # 注意索引，features[3] 是 Conv2
+
+    # 硬件需求：Weight Buffer 是 48-bit 宽 (存 6 个输入通道)。
+    # 我们需要按 "输出通道" 分组导出。
+    # 文件顺序：
+    # OutCh 0 的所有 5x5 (25行)
+    # OutCh 1 的所有 5x5 (25行)
+    # ...
+    # OutCh 15 的所有 5x5 (25行)
+    # 总行数 = 16 * 25 = 400 行。
+
+    K2, C2, R2, S2 = w2_tensor.shape # 16, 6, 5, 5
+
+    conv2_hex_lines = []
+
+    for out_ch in range(K2):
+        # 对于每个输出通道，我们需要遍历 5x5 的空间位置
+        for r in range(R2):
+            for s in range(S2):
+                # 在每个空间位置 (r,s)，我们要一次性取出 6 个输入通道的权重
+                # Pack: MSB -> InCh5 ... InCh0 -> LSB
+                line_hex = ""
+                for in_ch in range(C2-1, -1, -1): # 5 down to 0
+                    val_float = w2_tensor[out_ch, in_ch, r, s].item()
+                    val_int = to_fixed(val_float, SCALE_FACTOR)
+                    line_hex += to_hex(val_int, 8)
+                conv2_hex_lines.append(line_hex)
+
+    write_hex_file("conv2_weights.hex", conv2_hex_lines)
+
+    # Export Conv2 Bias
+    b2_tensor = net.features[3].bias.data
+    bias2_lines = []
+    # Bias Buffer 宽度是固定的 (6*32)。
+    # 但 Conv2 是 16 个输出通道。
+    # 我们按照 TDM 的 Pass 来存吗？
+    # Pass 0: 算 Ch 0-5. 需要 Bias 0-5.
+    # Pass 1: 算 Ch 6-11. 需要 Bias 6-11.
+    # Pass 2: 算 Ch 12-15. 需要 Bias 12-15 (最后两个补0).
+
+    # 所以我们每行存 6 个 Bias。总共 3 行。
+    for i in range(0, K2, 6): # 0, 6, 12
+        line_hex = ""
+        # 这一行里倒序放 6 个 bias (或者正序？保持正序简单点，根据之前的经验)
+        # 之前的 Bias Buffer 是 [k] 对应 Ch k。
+        # 这里的 [k] 对应这一个 Pass 里的第 k 个计算通道。
+        for k in range(6):
+            if (i + k) < K2:
+                val_float = b2_tensor[i + k].item()
+                val_int = int(round(val_float * (SCALE_FACTOR * SCALE_FACTOR)))
+            else:
+                val_int = 0 # Padding for incomplete pass
+
+            # 注意：Bias hex2int 是按 32位读的。
+            # 我们的 loader 是按 192位 写的。
+            # 为了简单，我们这里还是按行写单行 hex 吗？
+            # 不，之前的 Bias hex 是每行一个 32bit 数。
+            # 我们应该保持一致：Bias hex 文件里，每行一个数。
+            # Loader 会负责把 6 行读出来拼成一个宽字写进去。
+            pass
+
+    # 简单起见，Bias文件依然存单列。
+    bias2_lines_flat = []
+    for k in range(K2):
+        val_float = b2_tensor[k].item()
+        val_int = int(round(val_float * (SCALE_FACTOR * SCALE_FACTOR)))
+        bias2_lines_flat.append(to_hex(val_int, 32))
+
+    write_hex_file("conv2_bias.hex", bias2_lines_flat)
 
     print(f"All files exported to: {os.path.abspath(OUTPUT_DIR)}")
 

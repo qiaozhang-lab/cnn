@@ -1,7 +1,7 @@
 # ===============================================
 # Makefile for VCS + Verdi Simulation Environment
 # ===============================================
-export project_name = systolic_wrapper
+export project_name = lenet5_top
 
 CC := /usr/bin/gcc-4.8
 CXX := /usr/bin/g++-4.8

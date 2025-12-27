@@ -153,7 +153,7 @@ module tb_systolic_wrapper;
         end
 
         // Optional: Dump ALL results to a file for Python comparison
-        f = $fopen("../../verif/sim_output.txt", "w");
+        f = $fopen("../output/sim_output.txt", "w");
         if (f) begin
             $display("[TB] Writing all results to 'sim_output.txt'...");
 

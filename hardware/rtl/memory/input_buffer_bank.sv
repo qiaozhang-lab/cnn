@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-20 18:23:53
- * @LastEditTime: 2025-12-23 05:30:05
+ * @LastEditTime: 2025-12-26 23:27:24
  * @LastEditors: Qiao Zhang
  * @Description: Bank of Column FIFOs (The Smart Line Buffer).
  *               - Distributes Serial SRAM data to N columns.
@@ -19,24 +19,26 @@ module input_buffer_bank #(
     input   logic                   clk_i           ,
     input   logic                   rst_async_n_i   ,
 
+    // ===================================
+    // 1. Control & Config
+    // ===================================
     input   logic                   sa_done_i       ,// systolic arrays has calculated completely
-    // Tells the write distributor where to wrap.
-    // LeNet: 28. HD: 1920.
     input   logic                   start_i         ,
-    input   logic[31 : 0]           cfg_img_w_i     ,
+        // LeNet: 28. HD: 1920.
+    input   logic[31 : 0]           cfg_img_w_i     ,// Tells the write distributor where to wrap.
     input   logic[31 : 0]           cfg_img_h_i     ,
     input   logic[3 : 0]            cfg_kernel_r_i  ,// Logical Kernel Size: LeNet5 -> 5
+    input   logic [2 : 0]                               input_ch_sel_i  ,
 
     // ===================================
-    // 1. ROM/SRAM Interface (Master Mode)
+    // 2. SRAM Interface (Master Mode)
     // ===================================
-    output  logic[ROM_IMAGE_DEPTH_W-1 : 0]  rom_addr_o  ,
-    output  logic                           rom_rd_en_o ,
-        // Data returns from ROM (1 cycle latency expected)
-    input   logic[INT_WIDTH-1 : 0]          rom_data_i  ,
+    output  logic [K_CHANNELS-1 : 0]                    sram_rd_en_o    ,
+    output  logic [SRAM_ADDR_W-1 : 0]                   sram_rd_addr_o  ,
+    input   logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   sram_rd_data_i  ,
 
     // ===================================
-    // 2. Parallel Read Interface
+    // 3. Parallel Read Interface
     // ===================================
         // Need individual pop signals for Wavefront updates
         // Col 0 pops at T0, Col 1 pops at T1...
@@ -44,7 +46,7 @@ module input_buffer_bank #(
     output  logic[BANK_WIDTH-1 : 0][INT_WIDTH-1 : 0]     data_out_o     ,
 
     // ===================================
-    // 3. Control Handshake
+    // 4. Control Handshake
     // ===================================
         // Wrapper tells IB: "I finished processing the current wavefront row"
     input   logic                                       pre_wave_done_i ,
@@ -70,15 +72,17 @@ module input_buffer_bank #(
     logic [3:0]     row_cnt;      // Track how many rows we loaded
 
     // Address Logic
-    logic [ROM_IMAGE_DEPTH_W-1 : 0] current_rom_addr;
-    logic [ROM_IMAGE_DEPTH_W-1 : 0] next_rom_addr   ;
+    logic [SRAM_ADDR_W-1 : 0] curr_addr;
+    logic [SRAM_ADDR_W-1 : 0] next_addr   ;
+
+    logic internal_rd_req;
 
     // Write Distributor
     logic [$clog2(BANK_WIDTH)-1 : 0] wr_ptr;
 
-    // ROM Latency Handling
-    // Because ROM has 1 cycle latency, Valid signal is delayed rd_en
-    logic rom_valid_d1;
+    // SRAM Latency Handling
+    // Because RAM has 1 cycle latency, Valid signal is delayed rd_en
+    logic sram_valid_d1;
 
     // =========================================================
     // 1. Main Control FSM
@@ -127,19 +131,27 @@ module input_buffer_bank #(
     // =========================================================
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : addr_req_gen
         if(!rst_async_n_i) begin
-            total_rows_loaded <= '0;
-            row_cnt <= '0;
-            col_cnt <= '0;
-            current_rom_addr <= '0;
-            next_rom_addr    <= '0;
-            rom_rd_en_o <= 1'b0;
+            total_rows_loaded   <= '0;
+            row_cnt             <= '0;
+            col_cnt             <= '0;
+            curr_addr           <= '0;
+            next_addr           <= '0;
+            internal_rd_req     <= 1'b0;
         end else begin
-            rom_rd_en_o <= 1'b0;
+            internal_rd_req     <= 1'b0;
 
             case (state)
+                IDLE                 : begin
+                    col_cnt             <= '0;
+                    row_cnt             <= '0;
+                    curr_addr           <= '0;
+                    next_addr           <= '0;
+                    total_rows_loaded   <= '0;
+                end
                 PREFETCH, REFILL_ROW : begin
-                            rom_rd_en_o <= 1'b1;
-                            current_rom_addr <= next_rom_addr;
+                            internal_rd_req <= 1'b1;
+                            curr_addr       <= next_addr;
+                            next_addr       <= next_addr + 1'b1;// advance global address
                             // advance column counter
                             if(col_cnt == cfg_img_w_i-1) begin
                                 col_cnt <= '0;
@@ -148,35 +160,46 @@ module input_buffer_bank #(
                                 if(state == PREFETCH) row_cnt <= row_cnt + 1'b1;
                             end else
                                 col_cnt <= col_cnt + 1'b1;
-
-                            // advance global address
-                            next_rom_addr <= next_rom_addr + 1'b1;
                         end
                 default            : begin
-                            if (state == IDLE) begin
-                                col_cnt <= '0;
-                                row_cnt <= '0;
-                                current_rom_addr <= '0;
-                                next_rom_addr <= '0;
-                            end
+                            // Keep status
                         end
             endcase
         end
     end :addr_req_gen
 
-    assign rom_addr_o = current_rom_addr;
+    assign sram_rd_addr_o = curr_addr;
+
+    // =========================================================
+    // 3. SRAM Read Control (Bank Selection)
+    // =========================================================
+    always_comb begin : sram_read_logic
+        sram_rd_en_o = '0;
+        if(internal_rd_req) begin
+            sram_rd_en_o[input_ch_sel_i] = 1'b1;
+        end
+    end : sram_read_logic
+
+
+
+    // =========================================================
+    // 4. Data Mux
+    // =========================================================
+    logic [INT_WIDTH-1 : 0] selected_pixel_data  ;
+
+    assign  selected_pixel_data = sram_rd_data_i[input_ch_sel_i] ;
 
     // =========================================================
     // 3. Data Write (Handling ROM Latency)
     // =========================================================
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : write_input_buffer
         if(!rst_async_n_i) begin
-            rom_valid_d1 <= 1'b0;
+            sram_valid_d1 <= 1'b0;
             wr_ptr       <= '0;
         end else begin
-            rom_valid_d1 <= rom_rd_en_o; // Delay 1 cycle
+            sram_valid_d1 <= internal_rd_req; // Delay 1 cycle
 
-            if (rom_valid_d1) begin
+            if (sram_valid_d1) begin
                 // only rom data is valid, we move the pointer
                 if (wr_ptr == $clog2(BANK_WIDTH)'(cfg_img_w_i - 1))// line wrap
                     wr_ptr <= '0;
@@ -196,7 +219,7 @@ module input_buffer_bank #(
         for( i = 0; i<BANK_WIDTH ; i++) begin : gen_cols
             // Write Enable Logic: Only write if selected
             logic   push_en     ;
-            assign  push_en = rom_valid_d1 && (32'(wr_ptr) == i);
+            assign  push_en = sram_valid_d1 && (32'(wr_ptr) == i);
 
             column_fifo #(
                 .WIDTH(INT_WIDTH),
@@ -206,7 +229,7 @@ module input_buffer_bank #(
                 .rst_async_n_i(rst_async_n_i),
 
                 .push_i(push_en),
-                .data_i(rom_data_i),
+                .data_i(selected_pixel_data),
 
                 .pop_i(pop_i[i]),
                 .shift_window_i(pre_wave_done_i),

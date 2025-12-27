@@ -2,11 +2,15 @@
 "verilog.linting.linter": "verilator",
 "verilog.linting.verilator.runAtFileLocation": true,
 "verilog.linting.verilator.includePath": [
+    "./hardware/rtl/compute/",
+    "./hardware/rtl/control/",
     "./hardware/rtl/include/",
+    "./hardware/rtl/init_files/",
+    "./hardware/rtl/interfaces/",
     "./hardware/rtl/memory/",
-    "./hardware/rtl/ip/systolic_arrays/",
-    "./hardware/rtl/wrapper/",
-    "./hardware/rtl/control",
+    "./hardware/rtl/post_process/",
+    "./hardware/rtl/top/",
+
 ],
 "verilog.linting.verilator.arguments": "-Wno-UNOPTFLAT",
 

@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-23 05:37:55
- * @LastEditTime: 2025-12-24 17:20:12
+ * @LastEditTime: 2025-12-27 01:06:37
  * @LastEditors: Qiao Zhang
  * @Description: Weight Scheduler (West Controller) - Slave Mode.
  *              - Master-Slave Sync: follow the north-valid[0] signal of arr
@@ -22,20 +22,20 @@ module weight_scheduler (
     input   logic                   sync_i          ,// high: PE0 is coming to running, low: PE0 is idle
     input   logic[3 : 0]            cfg_kernel_r_i  ,
 
-    // ROM interface
-    output  logic                                       rom_rd_en_o     ,
-    output  logic[ROM_WEIGHTS_DEPTH_W-1 : 0]            rom_addr_o      ,
-    input   logic[K_CHANNELS-1 : 0] [INT_WIDTH-1 : 0]   rom_data_i      ,
+    // SRAM(weights buffer) interface
+    output  logic                                       wb_rd_en_o      ,
+    output  logic[SRAM_ADDR_W-1 : 0]                    wb_addr_o       ,
+    input   logic[K_CHANNELS-1 : 0] [INT_WIDTH-1 : 0]   wb_data_i       ,
 
     // systolic arrays west port
     output  logic[MATRIX_A_ROW-1 : 0]                   west_valid_o    ,
     output  logic[MATRIX_A_ROW-1 : 0][INT_WIDTH-1 : 0]  west_data_o
 );
 
-    logic[ROM_WEIGHTS_DEPTH_W-1 : 0]    curr_addr;
-    logic[ROM_WEIGHTS_DEPTH_W-1 : 0]    next_addr_calc;
+    logic[SRAM_ADDR_W-1 : 0]    curr_addr;
+    logic[SRAM_ADDR_W-1 : 0]    next_addr_calc;
 
-    assign  rom_rd_en_o = enable_i;
+    assign  wb_rd_en_o = enable_i;
 
     always_comb begin
         if(curr_addr < (cfg_kernel_r_i*cfg_kernel_r_i)-1)
@@ -44,7 +44,7 @@ module weight_scheduler (
             next_addr_calc = '0;
     end
 
-    assign rom_addr_o = (sync_i) ? next_addr_calc : '0;
+    assign wb_addr_o = (sync_i) ? next_addr_calc : '0;
 
     // address generate logic
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : addr_gen_logic
@@ -72,7 +72,7 @@ module weight_scheduler (
         for(r=0; r<MATRIX_A_ROW; r++)   begin : gen_west_skew
             if(r == 0)  begin
                 assign west_valid_o[r] = sync_i;
-                assign west_data_o[r]  = rom_data_i[r];
+                assign west_data_o[r]  = wb_data_i[r];
             end else if(r == 1)begin
                 logic                   delay_valid;
                 logic [INT_WIDTH-1 : 0] delay_data;
@@ -83,7 +83,7 @@ module weight_scheduler (
                         delay_data  <= '0;
                     end else if(enable_i) begin
                         delay_valid <= sync_i;
-                        delay_data  <= (sync_i) ? rom_data_i[r] : '0;
+                        delay_data  <= (sync_i) ? wb_data_i[r] : INT_WIDTH'(0);
                     end
                 end
                 assign west_valid_o[r] = delay_valid;
@@ -98,7 +98,7 @@ module weight_scheduler (
                         delay_data  <= '{default: '0};
                     end else if(enable_i) begin
                         delay_valid <= {delay_valid[r-2 : 0], sync_i};
-                        delay_data  <= {delay_data[r-2 : 0], rom_data_i[r]};
+                        delay_data  <= {delay_data[r-2 : 0], (sync_i)? wb_data_i[r] : INT_WIDTH'(0)};
                     end
                 end
                 assign west_valid_o[r] = delay_valid[r-1];

@@ -1,7 +1,7 @@
 '''
  @Author: Qiao Zhang
  @Date: 2025-12-23 10:05:00
- @LastEditTime: 2025-12-23 20:16:11
+ @LastEditTime: 2025-12-27 19:24:11
  @LastEditors: Qiao Zhang
  @Description:
  @FilePath: /cnn/tests/draft.py
@@ -82,15 +82,14 @@ assert len(data) == 784, f"数据长度应为784，实际为{len(data)}"
 matrix_28x28 = [data[i*28:(i+1)*28] for i in range(28)]
 
 inputs = np.array(matrix_28x28)
-inputs = inputs.reshape(-1, 98)
-weights_row = 0
+weights_row = 4
 # input matrix configuration
     # row
-input_start_row = 1
-input_end_row = 6
+input_start_row = 0
+input_end_row = 5
     # column
-input_start_col = 0
-input_end_col = 5
+input_start_col = 23
+input_end_col = 28
 
 # Slice
 w_tile = weights[weights_row,:]
@@ -102,25 +101,6 @@ print("================= Expect =================")
 print(f"Weights Matrix:W[{weights_row},:]")
 print(f"Input Matrix:I[{input_start_row}:{input_end_row},{input_start_col}:{input_end_col}]")
 print("Expect:",np.sum(w_tile*i_tile))
-
-weights_row = 0
-# input matrix configuration
-    # row
-input_start_row = 3
-input_end_row = 8
-    # column
-input_start_col = 93
-input_end_col = 98
-
-# Slice
-w_tile = weights[weights_row,:]
-i_tile = inputs[input_start_row:input_end_row,input_start_col:input_end_col].reshape(1,-1)
-
-print("================= Expect =================")
-print(f"Weights Matrix:W[{weights_row},:]")
-print(f"Input Matrix:I[{input_start_row}:{input_end_row},{input_start_col}:{input_end_col}]")
-print("Expect:",np.sum(w_tile*i_tile))
-
 # weights_row = 1
 # # input matrix configuration
 #     # row
@@ -283,23 +263,6 @@ print("Expect:",np.sum(w_tile*i_tile))
 # print(f"Input Matrix:I[{input_start_row}:{input_end_row},{input_start_col}:{input_end_col}]")
 # print("Expect:",np.sum(w_tile*i_tile))
 
-weights_row = 5
-# input matrix configuration
-    # row
-input_start_row = 3
-input_end_row = 8
-    # column
-input_start_col = 93
-input_end_col = 98
-
-# Slice
-w_tile = weights[weights_row,:]
-i_tile = inputs[input_start_row:input_end_row,input_start_col:input_end_col].reshape(1,-1)
-
-print("================= Expect =================")
-print(f"Weights Matrix:W[{weights_row},:]")
-print(f"Input Matrix:I[{input_start_row}:{input_end_row},{input_start_col}:{input_end_col}]")
-print("Expect:",np.sum(w_tile*i_tile))
 
 # print("================= Error Speculate =================")
 
