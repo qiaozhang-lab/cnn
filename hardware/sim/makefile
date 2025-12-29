@@ -63,4 +63,4 @@ dbg:
 # ===== Clean Simulation Files =====
 clean:
 	rm -rf *.fsdb *.log *.rc csrc simv ucli.key \
-		*.daidir verdiLog *.conf all
+		*.daidir verdiLog *.conf all *.txt

@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-27 02:15:22
- * @LastEditTime: 2025-12-27 18:38:55
+ * @LastEditTime: 2025-12-28 21:55:33
  * @LastEditors: Qiao Zhang
  * @Description: LeNet-5 Accelerator Top Level.
  *               - Instantiates Systolic Core, Global Buffer, Weight Buffer, Bias Buffer.
@@ -20,25 +20,26 @@ module lenet5_top (
     // 1. Host Control Interface (Register File)
     // ==========================================
         // A. configuration register
-    input   logic[31 : 0]       cfg_img_w_i     ,
-    input   logic[31 : 0]       cfg_img_h_i     ,
-    input   logic[3 : 0]        cfg_kernel_r_i  ,
+    input   logic[31 : 0]               cfg_img_w_i     ,
+    input   logic[31 : 0]               cfg_img_h_i     ,
+    input   logic[3 : 0]                cfg_kernel_r_i  ,
 
         // B. features key
-    input   logic[2 : 0]        cfg_input_ch_sel_i  ,
-    input   logic               cfg_do_pool_i   ,
-    input   logic               cfg_has_bias_i  ,
-    input   logic               cfg_do_relu_i   ,
-    input   logic[4 : 0]        cfg_quant_shift_i   ,
+    input   logic[2 : 0]                cfg_input_ch_sel_i  ,
+    input   logic                       cfg_do_pool_i   ,
+    input   logic                       cfg_has_bias_i  ,
+    input   logic                       cfg_do_relu_i   ,
+    input   logic[4 : 0]                cfg_quant_shift_i   ,
 
         // C. read/write address offset
     input   logic[SRAM_ADDR_W-1 : 0]    cfg_read_base_addr_i    ,
     input   logic[SRAM_ADDR_W-1 : 0]    cfg_write_base_addr_i   ,
 
         // D. instruction control
-    input   logic               host_start_i    ,
-    output  logic               accelerator_busy_o  ,
-    output  logic               accelerator_done_o  ,
+    input   logic                       host_start_i    ,
+    input   logic                       host_weight_loaded_i,
+    output  logic                       accelerator_busy_o  ,
+    output  logic                       accelerator_done_o  ,
 
     // ==========================================
     // 2. Host Data(image, weights, bias) Interface (DMA / Loader)
@@ -56,17 +57,17 @@ module lenet5_top (
     // ==========================================
         // --- Systolic Wrapper <-> Buffers ---
             //Global Buffer
-    logic [K_CHANNELS-1 : 0]    gb_rd_en;
-    logic [SRAM_ADDR_W-1 : 0]   gb_rd_addr;
+    logic [K_CHANNELS-1 : 0]                    gb_rd_en;
+    logic [SRAM_ADDR_W-1 : 0]                   gb_rd_addr;
     logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   gb_rd_data;
 
-    logic [K_CHANNELS-1 : 0]    gb_wr_en;
+    logic [K_CHANNELS-1 : 0]                    gb_wr_en;
     logic [K_CHANNELS-1 : 0][SRAM_ADDR_W-1 : 0] gb_wr_addr;
     logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   gb_wr_data;
 
             // Weight Buffer
-    logic                       wb_rd_en;
-    logic[SRAM_ADDR_W-1 : 0]    wb_rd_addr;
+    logic                                       wb_rd_en;
+    logic[SRAM_ADDR_W-1 : 0]                    wb_rd_addr;
     logic[K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]    wb_rd_data;
 
             // Bias Buffer (Assuming Bias is pre-loaded per layer)
@@ -86,24 +87,24 @@ module lenet5_top (
     logic[K_CHANNELS-1 : 0][ACC_WIDTH-1 : 0]    bb_wr_data_loader;
 
     // --- LeNet5 Controller
-    logic           ctrl_start_core;
-    logic           ctrl_done_core;
+    logic                                       ctrl_start_core;
+    logic                                       ctrl_done_core;
 
-    logic [31 : 0]      cfg_w;
-    logic [31 : 0]      cfg_h;
-    logic [3 : 0]       cfg_k;
-    logic [15 : 0]      cfg_num_ch;
-    logic               cfg_do_pool;
-    logic               cfg_do_bias;
-    logic               cfg_do_relu;
-    logic               cfg_do_quant;
-    logic [4 : 0]       cfg_quant_shift;
-    logic [31 : 0]      cfg_read_base;
-    logic [31 : 0]      cfg_write_base;
+    logic [31 : 0]                              cfg_w;
+    logic [31 : 0]                              cfg_h;
+    logic [3 : 0]                               cfg_k;
+    logic [15 : 0]                              cfg_num_ch;
+    logic                                       cfg_do_pool;
+    logic                                       cfg_do_bias;
+    logic                                       cfg_do_relu;
+    logic                                       cfg_do_quant;
+    logic [4 : 0]                               cfg_quant_shift;
+    logic [31 : 0]                              cfg_read_base;
+    logic [31 : 0]                              cfg_write_base;
         // Handshake
-    logic               req_load_weight;
-    logic [3 : 0]       layer_id    ;
-    logic               weight_loaded_ack;
+    logic                                       req_load_weight;
+    logic [3 : 0]                               layer_id    ;
+    logic                                       weight_loaded_ack;
 
     // =========================================================
     // 1. Loader Demux Logic
@@ -147,10 +148,12 @@ module lenet5_top (
     generate
         for(genvar k=0; k<K_CHANNELS; k++) begin
             // Read: Base + Wrapper Addr
-            assign gb_rd_addr_phys[k] = cfg_read_base_addr_i + gb_rd_addr;
+            // assign gb_rd_addr_phys[k] = cfg_read_base_addr_i + gb_rd_addr;
+            assign gb_rd_addr_phys[k] = cfg_read_base + gb_rd_addr;
 
             // Write: Base + Wrapper Addr (Truncate 32-bit addr from handler)
-            assign gb_wr_addr_phys[k] = cfg_write_base_addr_i + gb_wr_addr[k][SRAM_ADDR_W-1 : 0];
+            // assign gb_wr_addr_phys[k] = cfg_write_base_addr_i + gb_wr_addr[k][SRAM_ADDR_W-1 : 0];
+            assign gb_wr_addr_phys[k] = cfg_write_base + gb_wr_addr[k][SRAM_ADDR_W-1 : 0];
         end
     endgenerate
 
@@ -177,7 +180,7 @@ module lenet5_top (
         end else begin
             // Core Mode
             final_gb_wr_en   = gb_wr_en;
-            final_gb_wr_addr = gb_wr_addr;
+            final_gb_wr_addr = gb_wr_addr_phys;
             final_gb_wr_data = gb_wr_data;
         end
     end : gb_mux_sel
@@ -230,7 +233,6 @@ module lenet5_top (
     // =========================================================
     // 4. LeNet5 Controller and Core
     // =========================================================
-    assign weight_loaded_ack = req_load_weight;
 
     lenet_controller u_ctrl (
         .clk_i                  (clk_i),
@@ -240,7 +242,7 @@ module lenet5_top (
         .host_done_o            (accelerator_done_o),
         .req_load_weight_o      (req_load_weight),
         .layer_id_o             (layer_id),
-        .weight_loaded_i        (weight_loaded_ack),
+        .weight_loaded_i        (host_weight_loaded_i),
 
         .cfg_img_w_o            (cfg_w),
         .cfg_img_h_o            (cfg_h),
@@ -288,5 +290,6 @@ module lenet5_top (
         .start_i                (ctrl_start_core),
         .busy_o                 (accelerator_busy_o),
         .done_o                 (ctrl_done_core)
+        // .ib_weight_loaded_o     (weight_loaded_ack)
     );
 endmodule : lenet5_top

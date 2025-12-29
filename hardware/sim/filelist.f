@@ -11,6 +11,7 @@
 ../rtl/control/active_row_register.sv
 ../rtl/control/weight_scheduler.sv
 ../rtl/control/lenet5_controller.sv
+../rtl/post_process/partial_sum_accumulator.sv
 ../rtl/post_process/pooling_core.sv
 ../rtl/post_process/pooling_top.sv
 ../rtl/post_process/result_handler.sv

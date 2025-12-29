@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-20 18:23:53
- * @LastEditTime: 2025-12-26 23:27:24
+ * @LastEditTime: 2025-12-29 05:20:25
  * @LastEditors: Qiao Zhang
  * @Description: Bank of Column FIFOs (The Smart Line Buffer).
  *               - Distributes Serial SRAM data to N columns.
@@ -28,7 +28,7 @@ module input_buffer_bank #(
     input   logic[31 : 0]           cfg_img_w_i     ,// Tells the write distributor where to wrap.
     input   logic[31 : 0]           cfg_img_h_i     ,
     input   logic[3 : 0]            cfg_kernel_r_i  ,// Logical Kernel Size: LeNet5 -> 5
-    input   logic [2 : 0]                               input_ch_sel_i  ,
+    input   logic [2 : 0]           input_ch_sel_i  ,// come from wrapper counter
 
     // ===================================
     // 2. SRAM Interface (Master Mode)
@@ -52,6 +52,7 @@ module input_buffer_bank #(
     input   logic                                       pre_wave_done_i ,
         // IB tells Wrapper: "Data is ready, you can run"
     output  logic                                       ib_ready_o
+    // output  logic                                       weight_loaded_o
 );
 
     // =========================================================
@@ -84,6 +85,7 @@ module input_buffer_bank #(
     // Because RAM has 1 cycle latency, Valid signal is delayed rd_en
     logic sram_valid_d1;
 
+    logic       fifo_flush;
     // =========================================================
     // 1. Main Control FSM
     // =========================================================
@@ -103,8 +105,10 @@ module input_buffer_bank #(
                 PREFETCH    :   begin
                                 // Load K_R rows (e.g., 5 rows).
                                 // Condition: Row count reaches limit AND current col finishes
-                                if((row_cnt == cfg_kernel_r_i) && (col_cnt == cfg_img_w_i-1))
-                                    next_state = WAIT_TRIGGER;
+                                if((row_cnt == cfg_kernel_r_i) && (col_cnt == cfg_img_w_i-1)) begin
+                                    next_state      = WAIT_TRIGGER;
+                                    // weight_loaded_o = 1'b1;
+                                end
                             end
                 WAIT_TRIGGER:   begin
                                 // Waiting for the Systolic Wrapper to say "I'm done with top row"
@@ -137,16 +141,18 @@ module input_buffer_bank #(
             curr_addr           <= '0;
             next_addr           <= '0;
             internal_rd_req     <= 1'b0;
+            fifo_flush          <= 1'b0;
         end else begin
             internal_rd_req     <= 1'b0;
-
+            fifo_flush          <= 1'b0;
             case (state)
                 IDLE                 : begin
-                    col_cnt             <= '0;
-                    row_cnt             <= '0;
-                    curr_addr           <= '0;
-                    next_addr           <= '0;
-                    total_rows_loaded   <= '0;
+                            fifo_flush          <= '1;
+                            col_cnt             <= '0;
+                            row_cnt             <= '0;
+                            curr_addr           <= '0;
+                            next_addr           <= '0;
+                            total_rows_loaded   <= '0;
                 end
                 PREFETCH, REFILL_ROW : begin
                             internal_rd_req <= 1'b1;
@@ -157,7 +163,9 @@ module input_buffer_bank #(
                                 col_cnt <= '0;
                                 total_rows_loaded <= total_rows_loaded + 1'b1;
                                 // only increase row counter in prefetch stage for checking if K+1 row is full
-                                if(state == PREFETCH) row_cnt <= row_cnt + 1'b1;
+                                if(state == PREFETCH) begin
+                                    row_cnt <= row_cnt + 1'b1;
+                                end
                             end else
                                 col_cnt <= col_cnt + 1'b1;
                         end
@@ -179,8 +187,6 @@ module input_buffer_bank #(
             sram_rd_en_o[input_ch_sel_i] = 1'b1;
         end
     end : sram_read_logic
-
-
 
     // =========================================================
     // 4. Data Mux
@@ -227,6 +233,7 @@ module input_buffer_bank #(
             ) u_fifo(
                 .clk_i(clk_i),
                 .rst_async_n_i(rst_async_n_i),
+                .flush_i(fifo_flush),
 
                 .push_i(push_en),
                 .data_i(selected_pixel_data),

@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-20 17:50:54
- * @LastEditTime: 2025-12-21 20:51:59
+ * @LastEditTime: 2025-12-28 22:23:24
  * @LastEditors: Qiao Zhang
  * @Description: Smart Column Memory (Circular Buffer).
  *               - Supports Non-Destructive Read (Lookahead) for Convolution Reuse.
@@ -18,6 +18,7 @@ module column_fifo #(
 )(
     input   logic               clk_i           ,
     input   logic               rst_async_n_i   ,
+    input   logic               flush_i         ,
 
     // write interface form SRAM
     input   logic               push_i          ,
@@ -43,12 +44,18 @@ module column_fifo #(
     logic [$clog2(DEPTH) : 0]    lookahead_ptr;
 
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : blockName
-        if(!rst_async_n_i) begin : reset_logic
+        priority if(!rst_async_n_i) begin : reset_logic
             wr_ptr          <= '0;
             base_ptr        <= '0;
             lookahead_ptr   <= '0;
             mems            <= '{default: '0};
         end : reset_logic
+        else if(flush_i) begin
+            wr_ptr          <= '0;
+            base_ptr        <= '0;
+            lookahead_ptr   <= '0;
+            mems            <= '{default: '0};
+        end
         else begin
             // 1. Write Logic
             if(push_i & !full_o) begin

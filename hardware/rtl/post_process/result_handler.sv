@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-23 08:12:52
- * @LastEditTime: 2025-12-28 01:23:08
+ * @LastEditTime: 2025-12-29 07:00:26
  * @LastEditors: Qiao Zhang
  * @Description: Result Handler - Result Handler - With Quantization & SRAM Interface.
  * @FilePath: /cnn/hardware/rtl/post_process/result_handler.sv
@@ -11,32 +11,30 @@
 `include "definitions.sv"
 
 module result_handler (
-    input   logic           clk_i           ,
-    input   logic           rst_async_n_i   ,
+    input   logic                                       clk_i           ,
+    input   logic                                       rst_async_n_i   ,
+    input   logic                                       flush_i         ,
 
     // Config & Control
-    input   logic[31 : 0]              feature_map_w_i ,
-    input   logic                      has_bias_i  ,
-    input   logic                      do_ReLU_i   ,
-    input   logic                      do_Pooling_i,
-    input   logic                      has_quant_i ,
-    input   logic[4 : 0]               quant_shift_i,
+    input   logic[31 : 0]                               feature_map_w_i ,
+    input   logic                                       has_bias_i  ,
+    input   logic                                       do_ReLU_i   ,
+    input   logic                                       do_Pooling_i,
+    input   logic                                       has_quant_i ,
+    input   logic[4 : 0]                                quant_shift_i,
 
     // Monitor North Valid falling edge
-    input   logic[MATRIX_B_COL-1 : 0]  sa_valid_monitor_i                       ,
-    input   logic[ACC_WIDTH-1 : 0]     sa_result_i[MATRIX_A_ROW][MATRIX_B_COL]  ,
+    input   logic[MATRIX_B_COL-1 : 0]                   acc_valid_i ,
+    input   logic[ACC_WIDTH-1 : 0]                      acc_result_i[MATRIX_A_ROW][MATRIX_B_COL]  ,
 
     // bias input
     input   logic[K_CHANNELS-1 : 0][ACC_WIDTH-1 : 0]    bias_i  ,
 
-    // Output Clear Trigger (Per Column)
-    output  logic[MATRIX_B_COL-1 : 0]  pe_clear_o   ,
-
     // Debug
-    output  logic                      fifo_valid_o ,
+    output  logic                                       fifo_valid_o ,
 
     // SRAM Write Interface (To Global Buffer)
-    output  logic[K_CHANNELS-1 : 0]     sram_wr_en_o                ,
+    output  logic[K_CHANNELS-1 : 0]                     sram_wr_en_o                ,
     output  logic[K_CHANNELS-1 : 0][SRAM_ADDR_W-1 : 0]  sram_wr_addr_o ,
     output  logic[K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]    sram_wr_data_o
 );
@@ -44,33 +42,10 @@ module result_handler (
     // =========================================================
     // 1. Edge Detection
     // =========================================================
-    logic [MATRIX_B_COL-1 : 0] valid_d1;
 
-    // Base Trigger Signal -> the end moments of Channel 0
-    logic [MATRIX_B_COL-1 : 0] trigger_base;// delay col by col, depends on monitor the invalid
+    logic [MATRIX_B_COL-1 : 0] trigger_base;
 
-    always_ff @(posedge clk_i or negedge rst_async_n_i) begin
-        if(!rst_async_n_i) begin
-            valid_d1     <= '0;
-            trigger_base <= '0;
-            pe_clear_o   <= '0;
-        end else begin
-            valid_d1 <= sa_valid_monitor_i;
-
-            for (int c = 0; c < MATRIX_B_COL; c++) begin
-                // Falling Edge Detection: 1 -> 0, once a col is not valid, then the calculation of PE(0,x) is finished
-                // Note: we will handle the row delay in the next context
-                if (valid_d1[c] && !sa_valid_monitor_i[c]) begin
-                    trigger_base[c] <= 1'b1;
-                    pe_clear_o[c]   <= 1'b1; // Send Clear Pulse (Systolic Top will skew this internally)
-                end else begin
-                    trigger_base[c] <= 1'b0;
-                    pe_clear_o[c]   <= 1'b0;
-                end
-            end
-        end
-    end
-
+    assign trigger_base = acc_valid_i;
     assign fifo_valid_o = |trigger_base;
 
     // =========================================================
@@ -114,7 +89,7 @@ module result_handler (
 
                     stream_valid_raw[k] = 1'b1;
                     // Bias handle
-                    val_biased = (has_bias_i) ? (signed'(sa_result_i[k][c]) + signed'(bias_i[k])) : signed'(sa_result_i[k][c]);
+                    val_biased = (has_bias_i) ? (signed'(acc_result_i[k][c]) + signed'(bias_i[k])) : signed'(acc_result_i[k][c]);
                     // ReLU handle
                     stream_data_raw[k] = (do_ReLU_i && val_biased[ACC_WIDTH-1]) ? '0 : val_biased ;
                 end : sa_done_trigger_preprocess
@@ -177,6 +152,12 @@ module result_handler (
                 sram_wr_data_o[k]   <= '0;
             end
         end : reset_logic
+        else if(flush_i) begin
+            wr_ptrs        <= '{default: '0};
+            sram_wr_en_o   <= '0;
+            sram_wr_addr_o <= '0;
+            sram_wr_data_o <= '0;
+        end
         else begin : normal_operation
             for (int k = 0; k < K_CHANNELS; k++) begin
                     logic                           final_wr_en     ;

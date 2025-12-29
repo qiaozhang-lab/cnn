@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-19 23:11:52
- * @LastEditTime: 2025-12-28 01:02:38
+ * @LastEditTime: 2025-12-29 07:08:10
  * @LastEditors: Qiao Zhang
  * @Description: Systolic Wrapper (Final Integration).
  *               - Integrates Input Buffer, ARR, Weight Scheduler, Weight ROM, and Systolic Array.
@@ -22,18 +22,18 @@ module systolic_wrapper #(
     // 1. External Memory Interface
     // ===================================
         // A. Global Buffer Read Interface (For Input Buffer)
-    output  logic[K_CHANNELS-1 : 0]         gb_rd_en_o          ,
-    output  logic[SRAM_ADDR_W-1 : 0]        gb_rd_addr_o        ,
+    output  logic[K_CHANNELS-1 : 0]                     gb_rd_en_o      ,
+    output  logic[SRAM_ADDR_W-1 : 0]                    gb_rd_addr_o    ,
     input   logic[K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]    gb_rd_data_i    ,
 
         // B. Global Buffer Write Interface (For Result Handler)
-    output  logic[K_CHANNELS-1 : 0]         gb_wr_en_o          ,
+    output  logic[K_CHANNELS-1 : 0]                     gb_wr_en_o      ,
     output  logic[K_CHANNELS-1 : 0] [SRAM_ADDR_W-1 : 0] gb_wr_addr_o    ,
     output  logic[K_CHANNELS-1 : 0] [INT_WIDTH-1 : 0]   gb_wr_data_o    ,
 
         // C. Weight Buffer Read Interface (For Weight Scheduler)
-    output  logic                           wb_rd_en_o          ,
-    output  logic[SRAM_ADDR_W-1 : 0]        wb_rd_addr_o        ,
+    output  logic                                       wb_rd_en_o      ,
+    output  logic[SRAM_ADDR_W-1 : 0]                    wb_rd_addr_o    ,
     input   logic[K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]    wb_rd_data_i    ,
 
         // D. Bias Buffer Input
@@ -62,7 +62,6 @@ module systolic_wrapper #(
     input   logic                   start_i         ,
     output  logic                   busy_o          ,
     output  logic                   done_o
-
 );
 
     // =========================================================
@@ -91,11 +90,16 @@ module systolic_wrapper #(
     logic [ACC_WIDTH-1 : 0]                     result [MATRIX_A_ROW][MATRIX_B_COL];
 
     // --- Result Handler Signals ---
-    logic [MATRIX_B_COL-1 : 0]                  rh_pe_clear_req; // RH requested clear
     logic [K_CHANNELS-1 : 0]                    rh_sram_wr_en;
+    logic                                       rh_flush    ;
 
     // --- Gated Signals (Controlled by TDM FSM) ---
-    logic [MATRIX_B_COL-1 : 0]                  pe_clear_gated;
+    logic [K_CHANNELS-1 : 0]                    sram_wr_en_gated;
+
+    // --- SA <-> partial_sum_accumulator ---
+    logic [ACC_WIDTH-1 : 0]                     acc_result[MATRIX_A_ROW][MATRIX_B_COL];
+    logic [MATRIX_B_COL-1 : 0]                  acc_result_valid;
+    logic [MATRIX_B_COL-1 : 0]                  acc_pe_clear_req; // ACC requested clear
 
     // =========================================================
     // 1. TDM Control Logic (Internal FSM)
@@ -147,6 +151,8 @@ module systolic_wrapper #(
         endcase
     end
 
+    logic   acc_reset_trigger;
+
     // Counters & Control Signals
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : row_cnt_and_done_handle
         if(!rst_async_n_i) begin
@@ -154,15 +160,23 @@ module systolic_wrapper #(
             output_rows_done_cnt    <= '0;
             pass_done               <= 1'b0;
             arr_start_trigger       <= 1'b0;
+            acc_reset_trigger       <= 1'b0;
+            rh_flush                <= 1'b0;
         end else begin : normal_operation
             // Default Pulsed Signals
-            pass_done <= 1'b0;
-
+            pass_done           <= 1'b0;
+            acc_reset_trigger   <= 1'b0;
+            rh_flush            <= 1'b0;
             unique case(state)
                 IDLE    : begin
                             curr_input_ch_cnt    <= '0;
                             output_rows_done_cnt <= '0;
-                            if (start_i) arr_start_trigger <= 1'b1; // Start first pass
+
+                            if (start_i) begin
+                                arr_start_trigger <= 1'b1; // Start first pass
+                                acc_reset_trigger <= 1'b1;
+                                rh_flush <= 1'b1;
+                            end
                         end
 
                 RUN_PASS: begin
@@ -176,7 +190,11 @@ module systolic_wrapper #(
                                 end else begin
                                     arr_start_trigger <= 1'b1; // Keep triggering
                                 end
+                            end else begin
+                                if(arr_busy)
+                                    arr_start_trigger <= 1'b0;
                             end
+
                         end
 
                 NEXT_PASS_SETUP: begin
@@ -184,6 +202,7 @@ module systolic_wrapper #(
                             curr_input_ch_cnt    <= curr_input_ch_cnt + 1'b1;
                             output_rows_done_cnt <= '0;
                             arr_start_trigger    <= 1'b1; // Trigger ARR for new pass
+                            acc_reset_trigger    <= 1'b1;
                         end
 
                 DONE_STATE: begin
@@ -205,11 +224,10 @@ module systolic_wrapper #(
     // 2. Gating Logic (Accumulation Control)
     // =========================================================
 
-    // Only clear PE accumulator on the LAST pass
-    assign pe_clear_gated = (is_last_pass) ? rh_pe_clear_req : '0;
+    logic       is_first_pass;
 
-    // Only write to SRAM on the LAST pass
-    assign gb_wr_en_o     = (is_last_pass) ? rh_sram_wr_en : '0;
+    assign      is_first_pass = (curr_input_ch_cnt == 0);
+    assign      sram_wr_en_gated = (is_last_pass) ? rh_sram_wr_en : '0;
 
     // =========================================================
     // 3. Instantiations
@@ -221,7 +239,7 @@ module systolic_wrapper #(
 
         .start_i                (arr_start_trigger),// trigger prefetch
         .sa_done_i              (ib_rst_trig),
-
+        // .weight_loaded_o        (ib_weight_loaded_o),
         // configuration
         .cfg_img_w_i            (cfg_img_w_i),
         .cfg_img_h_i            (cfg_img_h_i),
@@ -263,6 +281,13 @@ module systolic_wrapper #(
         .north_data_o   (north_data)
     );
 
+    logic [SRAM_ADDR_W-1 : 0]   ws_addr_raw;
+    logic [SRAM_ADDR_W-1 : 0]   weight_offset;
+
+    always_comb begin : weight_addr_offset_calc
+        weight_offset = curr_input_ch_cnt * (cfg_kernel_r_i * cfg_kernel_r_i);
+    end : weight_addr_offset_calc
+
     // C. Weights Scheduler
     weight_scheduler u_weight_sched (
         .clk_i          (clk_i),
@@ -275,7 +300,7 @@ module systolic_wrapper #(
 
         // SRAM Interface(weights buffer)
         .wb_rd_en_o    (wb_rd_en_o),
-        .wb_addr_o     (wb_rd_addr_o),
+        .wb_addr_o     (ws_addr_raw),
         .wb_data_i     (wb_rd_data_i),
 
         // SA interface
@@ -283,11 +308,13 @@ module systolic_wrapper #(
         .west_data_o    (west_data)
     );
 
+    assign wb_rd_addr_o = ws_addr_raw + weight_offset;
+
     // D. Systolic Arrays
     systolic_top u_systolic_top(
         .clk_i          (clk_i),
         .rst_async_n_i  (rst_async_n_i),
-        .pe_clear_col_i (pe_clear_gated),
+        .pe_clear_col_i (acc_pe_clear_req),
 
         // Weights Inputs
         .west_valid_i   (west_valid),
@@ -305,10 +332,30 @@ module systolic_wrapper #(
 
     assign feature_map_w = cfg_img_w_i - cfg_kernel_r_i + 1'b1;
 
+    partial_sum_accumulator u_accumulator(
+        .clk_i                  (clk_i),
+        .rst_async_n_i          (rst_async_n_i),
+
+        .start_i                (acc_reset_trigger),
+
+        // Output Clear Signal
+        .pe_clear_o             (acc_pe_clear_req),
+
+        .is_first_pass_i        (is_first_pass),
+        .is_last_pass_i         (is_last_pass),
+
+        .sa_valid_monitor_i     (north_valid),
+        .sa_result_i            (result),
+
+        .accumulated_result_o   (acc_result),
+        .accumulated_valid_o    (acc_result_valid)
+    );
+
     // E. Result Handler
     result_handler u_res_handler (
         .clk_i                  (clk_i),
         .rst_async_n_i          (rst_async_n_i),
+        .flush_i                (rh_flush),
 
         // cfg & control
         .feature_map_w_i        (feature_map_w),
@@ -320,18 +367,17 @@ module systolic_wrapper #(
         .quant_shift_i          (quant_shift_i),
 
         // Monitor ARR Valid signal
-        .sa_valid_monitor_i (north_valid),
-        .sa_result_i        (result),
-
-        // Output Clear Signal
-        .pe_clear_o         (rh_pe_clear_req),
+        .acc_valid_i            (acc_result_valid),
+        .acc_result_i           (acc_result),
 
         // FIFO Interface (Stub for now)
-        .fifo_valid_o       (),
+        .fifo_valid_o           (),
 
-        .sram_wr_en_o       (rh_sram_wr_en),
-        .sram_wr_addr_o     (gb_wr_addr_o),
-        .sram_wr_data_o     (gb_wr_data_o)
+        .sram_wr_en_o           (rh_sram_wr_en),
+        .sram_wr_addr_o         (gb_wr_addr_o),
+        .sram_wr_data_o         (gb_wr_data_o)
     );
 
+    // Only write to SRAM on the LAST pass
+    assign gb_wr_en_o     = sram_wr_en_gated;
 endmodule : systolic_wrapper

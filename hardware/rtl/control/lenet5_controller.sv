@@ -1,10 +1,11 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-27 12:44:32
- * @LastEditTime: 2025-12-27 23:12:29
+ * @LastEditTime: 2025-12-28 21:31:08
  * @LastEditors: Qiao Zhang
- * @Description: LeNet-5 Controller.
- *               Sequences the execution of Conv1 -> Conv2 -> FC layers.
+ * @Description: LeNet-5 Controller - Sequences the execution of Conv1 -> Conv2 -> FC layers.
+ *               - Replaces hardcoded states with an "Output Group Counter".
+ *               - Calculates address offsets dynamically.
  * @FilePath: /cnn/hardware/rtl/control/lenet5_controller.sv
  */
 
@@ -41,6 +42,9 @@ module lenet_controller(
     output  logic               core_start_o,
     input   logic               core_done_i
 );
+    // Constant: Size of one output feature map channel for L2 (bytes)
+    // L2 Output is 5x5 (after pooling) = 25 bytes
+    localparam int L2_OUT_CH_SIZE = 25;
 
     typedef enum logic[3 : 0] {
         IDLE,
@@ -59,6 +63,8 @@ module lenet_controller(
 
     state_t state, next_state;
 
+    logic [2 : 0]   out_group_cnt;// output loop group counter
+
     always_ff @( posedge clk_i, negedge rst_async_n_i ) begin : fsm_trans
         if(!rst_async_n_i) begin
             state <= IDLE;
@@ -67,114 +73,142 @@ module lenet_controller(
         end
     end : fsm_trans
 
+    // Counter Management
+    always_ff @(posedge clk_i or negedge rst_async_n_i) begin
+        if(!rst_async_n_i) begin
+            out_group_cnt <= '0;
+        end else begin
+            // Reset before L2 starts
+            if (state == IDLE || state == L1_WAIT) begin
+                out_group_cnt <= '0;
+            end
+            // If L2 pass finished, increment counter
+            else if (state == L2_WAIT && core_done_i) begin
+                if (out_group_cnt < 2) // 0, 1 -> 2
+                    out_group_cnt <= out_group_cnt + 1'b1;
+            end
+        end
+    end
+
     always_comb begin : fsm_update
         next_state = state;
-
-        req_load_weight_o   = 1'b0  ;
-        layer_id_o          = '0    ;
-        core_start_o        = '0    ;
-        host_done_o         = '0    ;
-
-        cfg_img_w_o         = 28+2*2;
-        cfg_img_h_o         = 28+2*2;
-        cfg_kernel_r_o      = 5;
-        cfg_do_bias_o       = 1'b0;
-        cfg_do_relu_o       = 1'b0;
-        cfg_do_pool_o       = 1'b0;
-        cfg_do_quant_o      = 1'b0;
-        cfg_quant_shift_o   = '0;
-        cfg_num_input_channels_o  = '0;
-        cfg_read_base_o     = '0;
-        cfg_write_base_o    = '0;
-
         unique case(state)
             IDLE        :   if(host_start_i)    next_state = L1_REQ_LOAD;
             // ================= LAYER 1 =================
+            L1_REQ_LOAD :   if(weight_loaded_i) next_state = L1_RUN;
+
+            L1_RUN      :   next_state          = L1_WAIT;
+
+            L1_WAIT     :   if (core_done_i)    next_state = L2_REQ_LOAD;
+
+            // ================= LAYER 2 =================
+            L2_REQ_LOAD :   if (weight_loaded_i) next_state = L2_RUN;
+
+            L2_RUN      :   next_state          = L2_WAIT;
+
+            // Loop Logic: Finished Group 0, 1, 2
+            L2_WAIT     :   if(core_done_i)
+                                if (out_group_cnt == 2) next_state = DONE;
+                                else                    next_state = L2_REQ_LOAD; // Load next group weights
+
+            DONE        :   if (!host_start_i)      next_state = IDLE;
+
+            default     : next_state = IDLE;
+        endcase
+    end : fsm_update
+
+    always_comb begin : fsm_output
+        // default value avoid latch
+        req_load_weight_o           = 1'b0  ;
+        layer_id_o                  = '0    ;
+        core_start_o                = '0    ;
+        host_done_o                 = '0    ;
+
+        cfg_img_w_o                 = 28+2*2;
+        cfg_img_h_o                 = 28+2*2;
+        cfg_kernel_r_o              = 5;
+        cfg_do_bias_o               = 1'b0;
+        cfg_do_relu_o               = 1'b0;
+        cfg_do_pool_o               = 1'b0;
+        cfg_do_quant_o              = 1'b0;
+        cfg_quant_shift_o           = '0;
+        cfg_num_input_channels_o    = '0;
+        cfg_read_base_o             = '0;
+        cfg_write_base_o            = '0;
+
+        unique case (state)
+            IDLE        : ;//do nothing
+
+            // ================= LAYER 1 =================
             L1_REQ_LOAD : begin
-                        req_load_weight_o = 1'b1;
-                        layer_id_o        = 1;
-                        if(weight_loaded_i) next_state = L1_RUN;
-                    end
-
+                            req_load_weight_o   = 1'b1;
+                            layer_id_o          = 1;
+                        end
             L1_RUN      : begin
-                        cfg_img_w_o         = 28+2*2;
-                        cfg_img_h_o         = 28+2*2;
-                        cfg_kernel_r_o      = 5;
-                        cfg_do_bias_o       = 1'b1;
-                        cfg_do_relu_o       = 1'b1;
-                        cfg_do_pool_o       = 1'b1; // turn on pooling
-                        cfg_do_quant_o      = 1'b1;
-                        cfg_quant_shift_o   = 8;
-                        cfg_num_input_channels_o = 1;
-                        cfg_read_base_o     = 32'h0000_0000; // assume the address of input image is SRAM blank0
-                        cfg_write_base_o    = 32'h0000_0400; // write to 0x0400=>1024
-
-                        core_start_o        = 1'b1;// pulse
-                        next_state          = L1_WAIT;
-                    end
-
+                            cfg_img_w_o         = 28+2*2;
+                            cfg_img_h_o         = 28+2*2;
+                            cfg_kernel_r_o      = 5;
+                            cfg_do_bias_o       = 1'b1;
+                            cfg_do_relu_o       = 1'b1;
+                            cfg_do_pool_o       = 1'b1; // turn on pooling
+                            cfg_do_quant_o      = 1'b1;
+                            cfg_quant_shift_o   = 8;
+                            cfg_num_input_channels_o = 1;
+                            cfg_read_base_o     = 32'h0000_0000; // assume the address of input image is SRAM blank0
+                            cfg_write_base_o    = 32'h0000_0400; // write to 0x0400=>1024
+                            core_start_o        = 1'b1;// pulse
+                        end
             L1_WAIT     : begin
-                        // keep cfg
-                        cfg_img_w_o         = 28+2*2;
-                        cfg_img_h_o         = 28+2*2;
-                        cfg_kernel_r_o      = 5;
-                        cfg_do_bias_o       = 1'b1;
-                        cfg_do_relu_o       = 1'b1;
-                        cfg_do_pool_o       = 1'b1; // turn on pooling
-                        cfg_do_quant_o      = 1'b1;
-                        cfg_quant_shift_o   = 8;
-                        cfg_num_input_channels_o = 1;
-                        cfg_read_base_o     = 32'h0000_0000;
-                        cfg_write_base_o    = 32'h0000_0400;
-
-                        if (core_done_i) next_state = L2_REQ_LOAD;
-                    end
+                            // keep cfg
+                            cfg_img_w_o         = 28+2*2;
+                            cfg_img_h_o         = 28+2*2;
+                            cfg_kernel_r_o      = 5;
+                            cfg_do_bias_o       = 1'b1;
+                            cfg_do_relu_o       = 1'b1;
+                            cfg_do_pool_o       = 1'b1; // turn on pooling
+                            cfg_do_quant_o      = 1'b1;
+                            cfg_quant_shift_o   = 8;
+                            cfg_num_input_channels_o = 1;
+                            cfg_read_base_o     = 32'h0000_0000;
+                            cfg_write_base_o    = 32'h0000_0400;
+                        end
 
             // ================= LAYER 2 =================
             L2_REQ_LOAD : begin
-                        req_load_weight_o   = 1;
-                        layer_id_o          = 2; // ID 2 = Conv2
-                        if (weight_loaded_i) next_state = L2_RUN;
-                    end
+                            req_load_weight_o   = 1;
+                            layer_id_o          = 4'd2 + {1'b0, out_group_cnt};
+                        end
+            L2_RUN      : begin
+                            cfg_img_w_o         = 12+2; // the output of layer's pooling
+                            cfg_img_h_o         = 12+2;
+                            cfg_kernel_r_o      = 5;
+                            cfg_do_bias_o       = 1'b1;
+                            cfg_do_relu_o       = 1'b1;
+                            cfg_do_pool_o       = 1'b1; // turn on pooling
+                            cfg_do_quant_o      = 1'b1;
+                            cfg_quant_shift_o   = 8;
+                            cfg_num_input_channels_o = 6;
+                            cfg_read_base_o     = 32'h0000_0400;
+                            cfg_write_base_o    = 32'h0000_0800 + out_group_cnt * L2_OUT_CH_SIZE;
 
-            L2_RUN: begin
-                        cfg_img_w_o         = 12+2; // the output of layer's pooling
-                        cfg_img_h_o         = 12+2;
-                        cfg_kernel_r_o      = 5;
-                        cfg_do_bias_o       = 1'b1;
-                        cfg_do_relu_o       = 1'b1;
-                        cfg_do_pool_o       = 1'b1; // turn on pooling
-                        cfg_do_quant_o      = 1'b1;
-                        cfg_quant_shift_o   = 8;
-                        cfg_num_input_channels_o = 6;
-                        cfg_read_base_o     = 32'h0000_0400;
-                        cfg_write_base_o    = 32'h0000_0800;
-
-                        core_start_o        = 1;
-                        next_state          = L2_WAIT;
-                    end
-
-            L2_WAIT: begin
-                        cfg_img_w_o        = 12+2;
-                        cfg_img_h_o        = 12+2;
-                        cfg_kernel_r_o     = 5;
-                        cfg_do_bias_o       = 1'b1;
-                        cfg_do_relu_o       = 1'b1;
-                        cfg_do_pool_o       = 1'b1; // turn on pooling
-                        cfg_do_quant_o      = 1'b1;
-                        cfg_quant_shift_o   = 8;
-                        cfg_num_input_channels_o = 6;
-                        cfg_read_base_o    = 32'h0000_0400;
-                        cfg_write_base_o   = 32'h0000_0800;
-
-                        if (core_done_i) next_state = DONE;
-                    end
-
-            DONE: begin
-                        host_done_o        = 1;
-                        if (!host_start_i) next_state = IDLE;
-                    end
-            default     :;
+                            core_start_o        = 1;
+                        end
+            L2_WAIT     : begin
+                            cfg_img_w_o        = 12+2;
+                            cfg_img_h_o        = 12+2;
+                            cfg_kernel_r_o     = 5;
+                            cfg_do_bias_o       = 1'b1;
+                            cfg_do_relu_o       = 1'b1;
+                            cfg_do_pool_o       = 1'b1; // turn on pooling
+                            cfg_do_quant_o      = 1'b1;
+                            cfg_quant_shift_o   = 8;
+                            cfg_num_input_channels_o = 6;
+                            cfg_read_base_o    = 32'h0000_0400;
+                            cfg_write_base_o    = 32'h0000_0800 + out_group_cnt * L2_OUT_CH_SIZE;
+                        end
+            DONE        :   host_done_o        = 1'b1;
+            default     : ;// do nothing
         endcase
-    end : fsm_update
+    end : fsm_output
+
 endmodule : lenet_controller
