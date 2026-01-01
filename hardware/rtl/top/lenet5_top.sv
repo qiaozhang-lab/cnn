@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-27 02:15:22
- * @LastEditTime: 2025-12-28 21:55:33
+ * @LastEditTime: 2026-01-01 20:42:01
  * @LastEditors: Qiao Zhang
  * @Description: LeNet-5 Accelerator Top Level.
  *               - Instantiates Systolic Core, Global Buffer, Weight Buffer, Bias Buffer.
@@ -106,6 +106,36 @@ module lenet5_top (
     logic [3 : 0]                               layer_id    ;
     logic                                       weight_loaded_ack;
 
+    logic                                       conv_done;
+
+    logic [K_CHANNELS-1 : 0]                    fc_gb_rd_en;
+    logic [SRAM_ADDR_W-1 : 0]                   fc_gb_rd_addr;
+    logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   fc_gb_rd_data;
+
+    logic                       fc_running              ;
+    logic                       fc_core_start           ;
+
+    logic                       fc_done                 ;
+
+    logic                       fc_buffer_load_done     ;
+    logic                       fc_calc_start           ;
+    logic                       fc_core_done            ;
+    logic                       fc_load_from_sram       ;
+    logic [SRAM_ADDR_W-1 : 0]   fc_sram_load_addr       ;
+    logic [31:0]                fc_load_len             ;
+    logic [31:0]                fc_calc_len             ;
+    logic                       fc_do_bias              ;
+    logic                       fc_do_relu              ;
+    logic                       fc_do_quant             ;
+    logic [4:0]                 fc_quant_shift          ;
+    logic [9:0]                 fc_buffer_rd_addr       ;
+    logic [9:0]                 fc_buffer_wr_addr       ;
+
+    logic                       fc_weight_req           ;
+    logic                       fc_weight_ack           ;
+    logic [7:0]                 fc_weights_vector[100]  ;
+    logic [31:0]                fc_bias_vector[100]     ;
+
     // =========================================================
     // 1. Loader Demux Logic
     // =========================================================
@@ -167,7 +197,7 @@ module lenet5_top (
     logic [K_CHANNELS-1 : 0][SRAM_ADDR_W-1 : 0] final_gb_wr_addr;
     logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   final_gb_wr_data;
 
-    always_comb begin : gb_mux_sel
+    always_comb begin : gb_wr_mux_sel
         final_gb_wr_en   = '0;
         final_gb_wr_addr = '0;
         final_gb_wr_data = '0;
@@ -183,7 +213,23 @@ module lenet5_top (
             final_gb_wr_addr = gb_wr_addr_phys;
             final_gb_wr_data = gb_wr_data;
         end
-    end : gb_mux_sel
+    end : gb_wr_mux_sel
+
+    logic [K_CHANNELS-1 : 0]                    final_gb_rd_en;
+    logic [K_CHANNELS-1 : 0][SRAM_ADDR_W-1 : 0] final_gb_rd_addr;
+    logic [K_CHANNELS-1 : 0][INT_WIDTH-1 : 0]   final_gb_rd_data;
+
+    always_comb begin : gb_rd_mux_sel
+        if(fc_running) begin
+            final_gb_rd_en      = fc_gb_rd_en;
+            for(int k=0; k<K_CHANNELS; k++) begin
+                final_gb_rd_addr[k] = fc_gb_rd_addr;
+            end
+        end else begin
+            final_gb_rd_en      = gb_rd_en;
+            final_gb_rd_addr    = gb_rd_addr_phys;
+        end
+    end : gb_rd_mux_sel
 
     global_buffer #(
         .DEPTH(SRAM_DEPTH)
@@ -195,11 +241,10 @@ module lenet5_top (
         .wr_addr_i          (final_gb_wr_addr),
         .wr_data_i          (final_gb_wr_data),
 
-        .rd_en_i            (gb_rd_en),
-        .rd_addr_i          (gb_rd_addr_phys),
-        .rd_data_o          (gb_rd_data)
+        .rd_en_i            (final_gb_rd_en),
+        .rd_addr_i          (final_gb_rd_addr),
+        .rd_data_o          (final_gb_rd_data)
     );
-
 
     // B. Weight Buffer
     weight_buffer u_weight_buf(
@@ -231,7 +276,7 @@ module lenet5_top (
     );
 
     // =========================================================
-    // 4. LeNet5 Controller and Core
+    // 4. LeNet5 Conv Controller and Core
     // =========================================================
 
     lenet_controller u_ctrl (
@@ -239,7 +284,7 @@ module lenet5_top (
         .rst_async_n_i          (rst_async_n_i),
 
         .host_start_i           (host_start_i),
-        .host_done_o            (accelerator_done_o),
+        .host_done_o            (conv_done),
         .req_load_weight_o      (req_load_weight),
         .layer_id_o             (layer_id),
         .weight_loaded_i        (host_weight_loaded_i),
@@ -266,7 +311,7 @@ module lenet5_top (
 
         .gb_rd_en_o             (gb_rd_en),
         .gb_rd_addr_o           (gb_rd_addr),
-        .gb_rd_data_i           (gb_rd_data),
+        .gb_rd_data_i           (final_gb_rd_data),
 
         .gb_wr_en_o             (gb_wr_en),
         .gb_wr_addr_o           (gb_wr_addr),
@@ -290,6 +335,67 @@ module lenet5_top (
         .start_i                (ctrl_start_core),
         .busy_o                 (accelerator_busy_o),
         .done_o                 (ctrl_done_core)
-        // .ib_weight_loaded_o     (weight_loaded_ack)
     );
+
+    // =========================================================
+    // 5. LeNet5 FC Controller and Core
+    // =========================================================
+
+    fc_controller   u_fc_ctrl (
+        .clk_i                  (clk_i)         ,
+        .rst_async_n_i          (rst_async_n_i) ,
+
+        .start_i                (conv_done)     ,
+        .done_o                 (fc_done)       ,
+
+        .fc_running_o           (fc_running)    ,// a mux for select global buffer
+        .fc_core_start_o        (fc_core_start) ,// a pulse for trigger fc_accelerator_top start
+        .fc_calc_start_o        (fc_calc_start) ,
+
+        .fc_buffer_load_done_i  (fc_buffer_load_done),
+        .fc_core_done_i         (fc_core_done)  ,
+        .fc_load_from_sram_o    (fc_load_from_sram),
+        .fc_sram_load_addr_o    (fc_sram_load_addr),
+        .fc_load_len_o          (fc_load_len)   ,
+        .fc_calc_len_o          (fc_calc_len)   ,
+        .fc_do_bias_o           (fc_do_bias)    ,
+        .fc_do_relu_o           (fc_do_relu)    ,
+        .fc_do_quant_o          (fc_do_quant)   ,
+        .fc_quant_shift_o       (fc_quant_shift),
+        .fc_buffer_wr_addr_o    (fc_buffer_wr_addr),
+        .fc_buffer_rd_addr_o    (fc_buffer_rd_addr)
+    );
+
+    fc_accelerator_top  u_fc_top(
+        .clk_i                  (clk_i),
+        .rst_async_n_i          (rst_async_n_i),
+
+        .start_i                (fc_core_start),
+        .calc_start_i           (fc_calc_start),
+
+        .load_from_sram_i       (fc_load_from_sram),
+        .load_sram_addr_i       (fc_sram_load_addr),
+        .load_len_i             (fc_load_len),
+        .calc_len_i             (fc_calc_len),
+        .do_bias_i              (fc_do_bias),
+        .do_relu_i              (fc_do_relu),
+        .do_quant_i             (fc_do_quant),
+        .quant_shift_i          (fc_quant_shift),
+        .fb_rd_base_i           (fc_buffer_rd_addr),
+        .fb_wr_base_i           (fc_buffer_wr_addr),
+        .fb_load_done_o         (fc_buffer_load_done),
+        .weight_req_o           (fc_weight_req),
+        .weight_ack_i           (fc_weight_ack),
+
+        .weights_vector_i       (fc_weights_vector),
+        .bias_vector_i          (fc_bias_vector),
+
+        .sram_rd_en_o           (fc_gb_rd_en),
+        .sram_rd_addr_o         (fc_gb_rd_addr),
+        .sram_rd_data_i         (final_gb_rd_data),
+
+        .done_o                 (fc_core_done)
+    );
+
+    assign accelerator_done_o = fc_done;
 endmodule : lenet5_top

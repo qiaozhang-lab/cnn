@@ -1,11 +1,15 @@
 /**
  * @Author: Qiao Zhang
- * @Date: 2025-12-29
- * @Description: Partial Sum Accumulator - Fixed Output Synchronization.
+ * @Date: 2025-12-31 03:36:00
+ * @LastEditTime: 2026-01-01 20:53:49
+ * @LastEditors: Qiao Zhang
+ * @Description: Partial Sum Accumulator
  *               - Data Output: Registered (1 cycle latency).
  *               - Valid Output: Registered (1 cycle latency) to match Data.
  *               - Internal Skew: Matches Systolic Wavefront.
+ * @FilePath: /cnn/hardware/rtl/post_process/partial_sum_accumulator.sv
  */
+
 
 `timescale 1ns/1ps
 `include "definitions.sv"
@@ -47,10 +51,11 @@ module partial_sum_accumulator #(
             end else begin
                 valid_d1 <= sa_valid_monitor_i;
                 for(int c=0; c<MATRIX_B_COL; c++) begin
-                    // 下降沿检测：窗口结束
+                    // falling detector
                     if (valid_d1[c] && !sa_valid_monitor_i[c]) begin
                         base_trigger[c] <= 1'b1;
-                        // 立即发出清零，假设 SA 内部会处理行间延迟
+
+                        // clear right now, the skew will be done in wrapper
                         pe_clear_o[c]   <= 1'b1;
                     end else begin
                         base_trigger[c] <= 1'b0;
@@ -61,9 +66,7 @@ module partial_sum_accumulator #(
         end
     end
 
-    // --- 2. Valid Output Synchronization (关键修复) ---
-    // 数据输出是寄存器的，Valid 也必须是寄存器的，以保持相位一致
-    // 只有在 Last Pass 才输出 Valid
+    // --- 2. Valid Output Synchronization ---
     always_ff @(posedge clk_i or negedge rst_async_n_i) begin
         if(!rst_async_n_i) accumulated_valid_o <= '0;
         else begin
@@ -132,7 +135,7 @@ module partial_sum_accumulator #(
                         if (is_first_pass_i) old_val = 0;
                         else                 old_val = psum_mem[r][c][my_ptr];
 
-                        // 输出寄存器更新 (Latency = 1 relative to trigger)
+                        // output register update (Latency = 1 relative to trigger)
                         if (is_last_pass_i) accumulated_result_o[r][c] <= old_val + curr_val;
                         else                psum_mem[r][c][my_ptr]     <= old_val + curr_val;
                     end

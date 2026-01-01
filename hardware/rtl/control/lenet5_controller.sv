@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-27 12:44:32
- * @LastEditTime: 2025-12-28 21:31:08
+ * @LastEditTime: 2026-01-01 20:59:20
  * @LastEditors: Qiao Zhang
  * @Description: LeNet-5 Controller - Sequences the execution of Conv1 -> Conv2 -> FC layers.
  *               - Replaces hardcoded states with an "Output Group Counter".
@@ -42,6 +42,11 @@ module lenet_controller(
     output  logic               core_start_o,
     input   logic               core_done_i
 );
+
+    parameter int       ADDR_IMG_IN = 32'h0000;
+    parameter int       ADDR_L1_OUT = 32'h0400;
+    parameter int       ADDR_L2_OUT = 32'h0800;
+
     // Constant: Size of one output feature map channel for L2 (bytes)
     // L2 Output is 5x5 (after pooling) = 25 bytes
     localparam int L2_OUT_CH_SIZE = 25;
@@ -154,8 +159,8 @@ module lenet_controller(
                             cfg_do_quant_o      = 1'b1;
                             cfg_quant_shift_o   = 8;
                             cfg_num_input_channels_o = 1;
-                            cfg_read_base_o     = 32'h0000_0000; // assume the address of input image is SRAM blank0
-                            cfg_write_base_o    = 32'h0000_0400; // write to 0x0400=>1024
+                            cfg_read_base_o     = ADDR_IMG_IN; // assume the address of input image is SRAM blank0
+                            cfg_write_base_o    = ADDR_L1_OUT; // write to 0x0400=>1024
                             core_start_o        = 1'b1;// pulse
                         end
             L1_WAIT     : begin
@@ -169,8 +174,8 @@ module lenet_controller(
                             cfg_do_quant_o      = 1'b1;
                             cfg_quant_shift_o   = 8;
                             cfg_num_input_channels_o = 1;
-                            cfg_read_base_o     = 32'h0000_0000;
-                            cfg_write_base_o    = 32'h0000_0400;
+                            cfg_read_base_o     = ADDR_IMG_IN;
+                            cfg_write_base_o    = ADDR_L1_OUT;
                         end
 
             // ================= LAYER 2 =================
@@ -188,8 +193,8 @@ module lenet_controller(
                             cfg_do_quant_o      = 1'b1;
                             cfg_quant_shift_o   = 8;
                             cfg_num_input_channels_o = 6;
-                            cfg_read_base_o     = 32'h0000_0400;
-                            cfg_write_base_o    = 32'h0000_0800 + out_group_cnt * L2_OUT_CH_SIZE;
+                            cfg_read_base_o     = ADDR_L1_OUT;
+                            cfg_write_base_o    = ADDR_L2_OUT + out_group_cnt * L2_OUT_CH_SIZE;
 
                             core_start_o        = 1;
                         end
@@ -203,8 +208,8 @@ module lenet_controller(
                             cfg_do_quant_o      = 1'b1;
                             cfg_quant_shift_o   = 8;
                             cfg_num_input_channels_o = 6;
-                            cfg_read_base_o    = 32'h0000_0400;
-                            cfg_write_base_o    = 32'h0000_0800 + out_group_cnt * L2_OUT_CH_SIZE;
+                            cfg_read_base_o     = ADDR_L1_OUT;
+                            cfg_write_base_o    = ADDR_L2_OUT + out_group_cnt * L2_OUT_CH_SIZE;
                         end
             DONE        :   host_done_o        = 1'b1;
             default     : ;// do nothing

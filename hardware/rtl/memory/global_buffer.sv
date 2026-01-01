@@ -1,7 +1,7 @@
 /**
  * @Author: Qiao Zhang
  * @Date: 2025-12-25 23:41:48
- * @LastEditTime: 2025-12-27 16:11:31
+ * @LastEditTime: 2026-01-01 02:39:12
  * @LastEditors: Qiao Zhang
  * @Description: Global Buffer - 6 Banks of SRAM.
  *               - Stores Feature Maps (8-bit Quantized).
@@ -42,6 +42,8 @@ module global_buffer #(
             always_ff @( posedge clk_i ) begin : read_logic
                 if(rd_en_i[k])
                     rd_data_o[k] <= mems[rd_addr_i[k]]  ;
+                else
+                    rd_data_o[k] <= '0  ;
             end : read_logic
         end : gen_sram_banks
     endgenerate
